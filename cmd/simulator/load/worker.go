@@ -23,15 +23,18 @@ type singleAddressTxWorker struct {
 
 	sub      interfaces.Subscription
 	newHeads chan *types.Header
+
+	confirmErrors int
 }
 
 // NewSingleAddressTxWorker creates and returns a singleAddressTxWorker
 func NewSingleAddressTxWorker(ctx context.Context, client ethclient.Client, address common.Address) *singleAddressTxWorker {
 	newHeads := make(chan *types.Header)
 	tw := &singleAddressTxWorker{
-		client:   client,
-		address:  address,
-		newHeads: newHeads,
+		client:        client,
+		address:       address,
+		newHeads:      newHeads,
+		confirmErrors: 0,
 	}
 
 	sub, err := client.SubscribeNewHead(ctx, newHeads)
@@ -50,6 +53,7 @@ func (tw *singleAddressTxWorker) IssueTx(ctx context.Context, tx *types.Transact
 
 func (tw *singleAddressTxWorker) ConfirmTx(ctx context.Context, tx *types.Transaction) error {
 	txNonce := tx.Nonce()
+	errorCount := 0
 
 	for {
 		// If the is less than what has already been accepted, the transaction is confirmed
@@ -61,14 +65,19 @@ func (tw *singleAddressTxWorker) ConfirmTx(ctx context.Context, tx *types.Transa
 		case <-tw.newHeads:
 		case <-time.After(time.Second):
 		case <-ctx.Done():
-			return fmt.Errorf("failed to await tx %s nonce %d: %w", tx.Hash(), txNonce, ctx.Err())
+			return fmt.Errorf("context error: failed to await tx %s nonce %d: %w", tx.Hash(), txNonce, ctx.Err())
 		}
 
 		// Update the worker's accepted nonce, so we can check on the next iteration
 		// if the transaction has been accepted.
 		acceptedNonce, err := tw.client.NonceAt(ctx, tw.address, nil)
 		if err != nil {
-			return fmt.Errorf("failed to await tx %s nonce %d: %w", tx.Hash(), txNonce, err)
+			tw.confirmErrors++
+			errorCount++
+			time.Sleep(time.Duration(5 * float64(time.Second)))
+			if errorCount > 4 {
+				return fmt.Errorf("timeout unable to fetch nonce: failed to await tx %s nonce %d: %w", tx.Hash(), txNonce, err)
+			}
 		}
 		tw.acceptedNonce = acceptedNonce
 	}
@@ -80,4 +89,12 @@ func (tw *singleAddressTxWorker) Close(ctx context.Context) error {
 	}
 	close(tw.newHeads)
 	return nil
+}
+
+func (tw *singleAddressTxWorker) From(ctx context.Context) common.Address {
+	return tw.address
+}
+
+func (tw *singleAddressTxWorker) ConfirmErrors(ctx context.Context) int {
+	return tw.confirmErrors
 }

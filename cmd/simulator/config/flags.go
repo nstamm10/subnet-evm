@@ -28,6 +28,10 @@ const (
 	TimeoutKey        = "timeout"
 	BatchSizeKey      = "batch-size"
 	MetricsPortKey    = "metrics-port"
+	SustainedTpsKey   = "sustained-tps"
+	SendAddressKey    = "send-address"
+	TxDataKey         = "tx-data"
+	GasLimitKey       = "gas-limit"
 )
 
 var (
@@ -46,6 +50,10 @@ type Config struct {
 	Timeout      time.Duration `json:"timeout"`
 	BatchSize    uint64        `json:"batch-size"`
 	MetricsPort  uint64        `json:"metrics-port"`
+	SustainedTps float64       `json:"sustained-tps"`
+	SendAddress  string        `json:"send-address"`
+	TxData       string        `json:"tx-data"`
+	GasLimit     uint64        `json:"gas-limit"`
 }
 
 func BuildConfig(v *viper.Viper) (Config, error) {
@@ -59,6 +67,10 @@ func BuildConfig(v *viper.Viper) (Config, error) {
 		Timeout:      v.GetDuration(TimeoutKey),
 		BatchSize:    v.GetUint64(BatchSizeKey),
 		MetricsPort:  v.GetUint64(MetricsPortKey),
+		SustainedTps: v.GetFloat64(SustainedTpsKey),
+		SendAddress:  v.GetString(SendAddressKey),
+		TxData:       v.GetString(TxDataKey),
+		GasLimit:     v.GetUint64(GasLimitKey),
 	}
 	if len(c.Endpoints) == 0 {
 		return c, ErrNoEndpoints
@@ -122,4 +134,8 @@ func addSimulatorFlags(fs *pflag.FlagSet) {
 	fs.String(LogLevelKey, "info", "Specify the log level to use in the simulator")
 	fs.Uint64(BatchSizeKey, 100, "Specify the batchsize for the worker to issue and confirm txs")
 	fs.Uint64(MetricsPortKey, 8082, "Specify the port to use for the metrics server")
+	fs.Float64(SustainedTpsKey, 0., "Specify the desired sustained TPS for the simulation")
+	fs.String(SendAddressKey, "", "Specify the address to send the load test transaction to")
+	fs.String(TxDataKey, "", "Specify custom tx data to include in the transaction (can be smart contract call data)")
+	fs.Uint64(GasLimitKey, 21000, "Specify gas limit value for load test transaction (default 21,000)")
 }

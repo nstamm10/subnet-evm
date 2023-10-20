@@ -13,9 +13,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/ava-labs/subnet-evm/cmd/simulator/config"
 	"github.com/ava-labs/subnet-evm/cmd/simulator/key"
@@ -35,6 +37,12 @@ import (
 const (
 	MetricsEndpoint = "/metrics" // Endpoint for the Prometheus Metrics Server
 )
+
+// Key value structure for error map
+type kv struct {
+	Error string
+	Count int
+}
 
 // ExecuteLoader creates txSequences from [config] and has txAgents execute the specified simulation.
 func ExecuteLoader(ctx context.Context, config config.Config) error {
@@ -128,14 +136,22 @@ func ExecuteLoader(ctx context.Context, config config.Config) error {
 	log.Info("Creating transaction sequences...")
 	txGenerator := func(key *ecdsa.PrivateKey, nonce uint64) (*types.Transaction, error) {
 		addr := ethcrypto.PubkeyToAddress(key.PublicKey)
+		if len(config.SendAddress) != 0 {
+			addr = common.HexToAddress(config.SendAddress)
+		}
+
+		txData := common.FromHex(config.TxData)
+		if config.TxData == "" {
+			txData = nil
+		}
 		tx, err := types.SignNewTx(key, signer, &types.DynamicFeeTx{
 			ChainID:   chainID,
 			Nonce:     nonce,
 			GasTipCap: gasTipCap,
 			GasFeeCap: gasFeeCap,
-			Gas:       params.TxGas,
+			Gas:       config.GasLimit,
 			To:        &addr,
-			Data:      nil,
+			Data:      txData,
 			Value:     common.Big0,
 		})
 		if err != nil {
@@ -151,7 +167,7 @@ func ExecuteLoader(ctx context.Context, config config.Config) error {
 	log.Info("Constructing tx agents...", "numAgents", config.Workers)
 	agents := make([]txs.Agent[*types.Transaction], 0, config.Workers)
 	for i := 0; i < config.Workers; i++ {
-		agents = append(agents, txs.NewIssueNAgent[*types.Transaction](txSequences[i], NewSingleAddressTxWorker(ctx, clients[i], senders[i]), config.BatchSize, m))
+		agents = append(agents, txs.NewIssueNAgent[*types.Transaction](txSequences[i], NewSingleAddressTxWorker(ctx, clients[i], senders[i]), config.BatchSize, config.SustainedTps, m))
 	}
 
 	log.Info("Starting tx agents...")
@@ -166,9 +182,64 @@ func ExecuteLoader(ctx context.Context, config config.Config) error {
 	go startMetricsServer(ctx, metricsPort, reg)
 
 	log.Info("Waiting for tx agents...")
-	if err := eg.Wait(); err != nil {
-		return err
+	waitChan := make(chan struct{})
+	go func() {
+		eg.Wait()
+		close(waitChan)
+	}()
+
+L:
+	for {
+		select {
+		case <-waitChan:
+			if err := eg.Wait(); err != nil {
+				errMap := make(map[string]int)
+				for _, agent := range agents {
+					errMap[agent.Error(ctx).Error()]++
+				}
+
+				var errors []kv
+				for e, c := range errMap {
+					errors = append(errors, kv{e, c})
+				}
+
+				sort.Slice(errors, func(i, j int) bool {
+					return errors[i].Count > errors[j].Count
+				})
+				mostCommonError := errors[0]
+				msgStr := fmt.Sprintf("%d errors had this error", mostCommonError.Count)
+				log.Info(msgStr, "Error", mostCommonError.Error)
+				return nil
+			}
+			break L
+		default:
+			time.Sleep(2 * time.Minute)
+			var activeAgents, completedAgents, erroredAgents, progress, txRemaining, issueErrors, confirmErrors int
+			var tps float64
+			for _, agent := range agents {
+				tps += agent.TPS(ctx)
+				progress += agent.Progress(ctx)
+				txRemaining += int(config.TxsPerWorker)
+				if agent.Status(ctx) == txs.Active {
+					activeAgents++
+				}
+				if agent.Status(ctx) == txs.Completed {
+					completedAgents++
+				}
+				if agent.Status(ctx) == txs.Errored {
+					erroredAgents++
+				}
+				issueErrors += agent.IssueErrors(ctx)
+				confirmErrors += agent.ConfirmErrors(ctx)
+			}
+			progressString := fmt.Sprintf("%d/%d", progress, txRemaining)
+			log.Info("Ongoing Simulation Report", "Progress", progressString, "Current TPS", tps, "Signers Active", activeAgents, "Signers Complete", completedAgents, "Signers Errored", erroredAgents)
+			log.Info("Ongoing Error Report", "Issue Errors", issueErrors, "Confirm Errors", confirmErrors)
+		}
 	}
+	// if err := eg.Wait(); err != nil {
+	// 	return err
+	// }
 	log.Info("Tx agents completed successfully.")
 
 	printOutputFromMetricsServer(metricsPort)
